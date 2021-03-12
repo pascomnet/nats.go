@@ -180,25 +180,33 @@ func (js *js) AccountInfo(opts ...JSOpt) (*AccountInfo, error) {
 		defer cancel()
 	}
 
-	resp, err := js.nc.RequestWithContext(o.ctx, js.apiSubj(apiAccountInfo), nil)
+	var ret *AccountInfo
+	err = attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		resp, err := js.nc.RequestWithContext(o.ctx, js.apiSubj(apiAccountInfo), nil)
+		if err != nil {
+			return err
+		}
+		var info accountInfoResponse
+		if err := json.Unmarshal(resp.Data, &info); err != nil {
+			return err
+		}
+		if info.Error != nil {
+			var err error
+			if strings.Contains(info.Error.Description, "not enabled for") {
+				err = ErrJetStreamNotEnabled
+			} else {
+				err = errors.New(info.Error.Description)
+			}
+			return err
+		}
+		ret = &info.AccountInfo
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var info accountInfoResponse
-	if err := json.Unmarshal(resp.Data, &info); err != nil {
-		return nil, err
-	}
-	if info.Error != nil {
-		var err error
-		if strings.Contains(info.Error.Description, "not enabled for") {
-			err = ErrJetStreamNotEnabled
-		} else {
-			err = errors.New(info.Error.Description)
-		}
-		return nil, err
-	}
 
-	return &info.AccountInfo, nil
+	return ret, nil
 }
 
 type createConsumerRequest struct {
@@ -349,31 +357,32 @@ func (c *consumerLister) Next() bool {
 		return false
 	}
 
-	var cancel context.CancelFunc
-	ctx := c.js.opts.ctx
-	if ctx == nil {
-		ctx, cancel = context.WithTimeout(context.Background(), c.js.opts.wait)
-		defer cancel()
-	}
-
+	o := c.js.opts
 	clSubj := c.js.apiSubj(fmt.Sprintf(apiConsumerListT, c.stream))
-	r, err := c.js.nc.RequestWithContext(ctx, clSubj, req)
+	err = attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := c.js.nc.RequestWithContext(sctx, clSubj, req)
+		if err != nil {
+			return err
+		}
+		var resp consumerListResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+
+		c.pageInfo = &resp.apiPaged
+		c.page = resp.Consumers
+		return nil
+	})
 	if err != nil {
 		c.err = err
 		return false
 	}
-	var resp consumerListResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		c.err = err
-		return false
-	}
-	if resp.Error != nil {
-		c.err = errors.New(resp.Error.Description)
-		return false
-	}
-
-	c.pageInfo = &resp.apiPaged
-	c.page = resp.Consumers
 	c.offset += len(c.page)
 	return true
 }
@@ -446,31 +455,32 @@ func (c *consumerNamesLister) Next() bool {
 		return false
 	}
 
-	var cancel context.CancelFunc
-	ctx := c.js.opts.ctx
-	if ctx == nil {
-		ctx, cancel = context.WithTimeout(context.Background(), c.js.opts.wait)
-		defer cancel()
-	}
-
+	o := c.js.opts
 	clSubj := c.js.apiSubj(fmt.Sprintf(apiConsumerNamesT, c.stream))
-	r, err := c.js.nc.RequestWithContext(ctx, clSubj, nil)
+	err := attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := c.js.nc.RequestWithContext(sctx, clSubj, nil)
+		if err != nil {
+			return err
+		}
+		var resp consumerNamesListResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+
+		c.pageInfo = &resp.apiPaged
+		c.page = resp.Consumers
+		return nil
+	})
 	if err != nil {
 		c.err = err
 		return false
 	}
-	var resp consumerNamesListResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		c.err = err
-		return false
-	}
-	if resp.Error != nil {
-		c.err = errors.New(resp.Error.Description)
-		return false
-	}
-
-	c.pageInfo = &resp.apiPaged
-	c.page = resp.Consumers
 	c.offset += len(c.page)
 	return true
 }
@@ -538,18 +548,29 @@ func (js *js) AddStream(cfg *StreamConfig, opts ...JSOpt) (*StreamInfo, error) {
 	}
 
 	csSubj := js.apiSubj(fmt.Sprintf(apiStreamCreateT, cfg.Name))
-	r, err := js.nc.RequestWithContext(o.ctx, csSubj, req)
+	var ret *StreamInfo
+	err = attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := js.nc.RequestWithContext(sctx, csSubj, req)
+		if err != nil {
+			return err
+		}
+		var resp streamCreateResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+		ret = resp.StreamInfo
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var resp streamCreateResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		return nil, err
-	}
-	if resp.Error != nil {
-		return nil, errors.New(resp.Error.Description)
-	}
-	return resp.StreamInfo, nil
+	return ret, nil
 }
 
 type streamInfoResponse = streamCreateResponse
@@ -564,18 +585,29 @@ func (js *js) StreamInfo(stream string, opts ...JSOpt) (*StreamInfo, error) {
 	}
 
 	csSubj := js.apiSubj(fmt.Sprintf(apiStreamInfoT, stream))
-	r, err := js.nc.RequestWithContext(o.ctx, csSubj, nil)
+	var ret *StreamInfo
+	err = attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := js.nc.RequestWithContext(sctx, csSubj, nil)
+		if err != nil {
+			return err
+		}
+		var resp streamInfoResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+		ret = resp.StreamInfo
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var resp streamInfoResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		return nil, err
-	}
-	if resp.Error != nil {
-		return nil, errors.New(resp.Error.Description)
-	}
-	return resp.StreamInfo, nil
+	return ret, nil
 }
 
 // StreamInfo shows config and current state for this stream.
@@ -644,18 +676,29 @@ func (js *js) UpdateStream(cfg *StreamConfig, opts ...JSOpt) (*StreamInfo, error
 	}
 
 	usSubj := js.apiSubj(fmt.Sprintf(apiStreamUpdateT, cfg.Name))
-	r, err := js.nc.RequestWithContext(o.ctx, usSubj, req)
+	var ret *StreamInfo
+	err = attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := js.nc.RequestWithContext(sctx, usSubj, req)
+		if err != nil {
+			return err
+		}
+		var resp streamInfoResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+		ret = resp.StreamInfo
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var resp streamInfoResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		return nil, err
-	}
-	if resp.Error != nil {
-		return nil, errors.New(resp.Error.Description)
-	}
-	return resp.StreamInfo, nil
+	return ret, nil
 }
 
 // streamDeleteResponse is the response for a Stream delete request.
@@ -679,18 +722,23 @@ func (js *js) DeleteStream(name string, opts ...JSOpt) error {
 	}
 
 	dsSubj := js.apiSubj(fmt.Sprintf(apiStreamDeleteT, name))
-	r, err := js.nc.RequestWithContext(o.ctx, dsSubj, nil)
-	if err != nil {
-		return err
-	}
-	var resp streamDeleteResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		return err
-	}
-	if resp.Error != nil {
-		return errors.New(resp.Error.Description)
-	}
-	return nil
+	return attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := js.nc.RequestWithContext(sctx, dsSubj, nil)
+		if err != nil {
+			return err
+		}
+		var resp streamDeleteResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+		return nil
+	})
 }
 
 type apiMsgGetRequest struct {
@@ -742,20 +790,29 @@ func (js *js) GetMsg(name string, seq uint64, opts ...JSOpt) (*RawStreamMsg, err
 	}
 
 	dsSubj := js.apiSubj(fmt.Sprintf(apiMsgGetT, name))
-	r, err := js.nc.RequestWithContext(o.ctx, dsSubj, req)
+	var msg *storedMsg
+	err = attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := js.nc.RequestWithContext(sctx, dsSubj, req)
+		if err != nil {
+			return err
+		}
+
+		var resp apiMsgGetResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+		msg = resp.Message
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	var resp apiMsgGetResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		return nil, err
-	}
-	if resp.Error != nil {
-		return nil, errors.New(resp.Error.Description)
-	}
-
-	msg := resp.Message
 
 	var hdr http.Header
 	if msg.Header != nil {
@@ -804,18 +861,23 @@ func (js *js) DeleteMsg(name string, seq uint64, opts ...JSOpt) error {
 	}
 
 	dsSubj := js.apiSubj(fmt.Sprintf(apiMsgDeleteT, name))
-	r, err := js.nc.RequestWithContext(o.ctx, dsSubj, req)
-	if err != nil {
-		return err
-	}
-	var resp msgDeleteResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		return err
-	}
-	if resp.Error != nil {
-		return errors.New(resp.Error.Description)
-	}
-	return nil
+	return attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := js.nc.RequestWithContext(sctx, dsSubj, req)
+		if err != nil {
+			return err
+		}
+		var resp msgDeleteResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+		return nil
+	})
 }
 
 type streamPurgeResponse struct {
@@ -835,18 +897,23 @@ func (js *js) PurgeStream(name string, opts ...JSOpt) error {
 	}
 
 	psSubj := js.apiSubj(fmt.Sprintf(apiStreamPurgeT, name))
-	r, err := js.nc.RequestWithContext(o.ctx, psSubj, nil)
-	if err != nil {
-		return err
-	}
-	var resp streamPurgeResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		return err
-	}
-	if resp.Error != nil {
-		return errors.New(resp.Error.Description)
-	}
-	return nil
+	return attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := js.nc.RequestWithContext(sctx, psSubj, nil)
+		if err != nil {
+			return err
+		}
+		var resp streamPurgeResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+		return nil
+	})
 }
 
 // streamLister fetches pages of StreamInfo objects. This object is not safe
@@ -892,31 +959,32 @@ func (s *streamLister) Next() bool {
 		return false
 	}
 
-	var cancel context.CancelFunc
-	ctx := s.js.opts.ctx
-	if ctx == nil {
-		ctx, cancel = context.WithTimeout(context.Background(), s.js.opts.wait)
-		defer cancel()
-	}
-
 	slSubj := s.js.apiSubj(apiStreamList)
-	r, err := s.js.nc.RequestWithContext(ctx, slSubj, req)
+	o := s.js.opts
+	err = attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
+
+		r, err := s.js.nc.RequestWithContext(sctx, slSubj, req)
+		if err != nil {
+			return err
+		}
+		var resp streamListResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+		s.pageInfo = &resp.apiPaged
+		s.page = resp.Streams
+		return nil
+	})
 	if err != nil {
 		s.err = err
 		return false
 	}
-	var resp streamListResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		s.err = err
-		return false
-	}
-	if resp.Error != nil {
-		s.err = errors.New(resp.Error.Description)
-		return false
-	}
 
-	s.pageInfo = &resp.apiPaged
-	s.page = resp.Streams
 	s.offset += len(s.page)
 	return true
 }
@@ -977,30 +1045,31 @@ func (l *streamNamesLister) Next() bool {
 		return false
 	}
 
-	var cancel context.CancelFunc
-	ctx := l.js.opts.ctx
-	if ctx == nil {
-		ctx, cancel = context.WithTimeout(context.Background(), l.js.opts.wait)
-		defer cancel()
-	}
+	o := l.js.opts
+	err := attempt(o.ctx, o.maxTries, o.retryBackoff, func() error {
+		sctx, scancel := context.WithTimeout(o.ctx, o.wait)
+		defer scancel()
 
-	r, err := l.js.nc.RequestWithContext(ctx, l.js.apiSubj(apiStreams), nil)
+		r, err := l.js.nc.RequestWithContext(sctx, l.js.apiSubj(apiStreams), nil)
+		if err != nil {
+			return err
+		}
+		var resp streamNamesResponse
+		if err := json.Unmarshal(r.Data, &resp); err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return errors.New(resp.Error.Description)
+		}
+		l.pageInfo = &resp.apiPaged
+		l.page = resp.Streams
+		return nil
+	})
 	if err != nil {
 		l.err = err
 		return false
 	}
-	var resp streamNamesResponse
-	if err := json.Unmarshal(r.Data, &resp); err != nil {
-		l.err = err
-		return false
-	}
-	if resp.Error != nil {
-		l.err = errors.New(resp.Error.Description)
-		return false
-	}
 
-	l.pageInfo = &resp.apiPaged
-	l.page = resp.Streams
 	l.offset += len(l.page)
 	return true
 }
@@ -1051,11 +1120,7 @@ func getJSContextOpts(defs *jsOpts, opts ...JSOpt) (*jsOpts, context.CancelFunc,
 		}
 	}
 
-	// Check for option collisions. Right now just timeout and context.
-	if o.ctx != nil && o.wait != 0 {
-		return nil, nil, ErrContextAndTimeout
-	}
-	if o.wait == 0 && o.ctx == nil {
+	if o.wait == 0 {
 		o.wait = defs.wait
 	}
 	var cancel context.CancelFunc
@@ -1066,5 +1131,39 @@ func getJSContextOpts(defs *jsOpts, opts ...JSOpt) (*jsOpts, context.CancelFunc,
 		o.pre = defs.pre
 	}
 
+	if o.maxTries >= 0 {
+		// 1 normal try plus the number of retries.
+		o.maxTries++
+	}
+	// Otherwise, infinite retries.
+
+	if o.retryBackoff == time.Duration(0) {
+		o.retryBackoff = 100 * time.Millisecond
+	}
+
 	return &o, cancel, nil
+}
+
+func attempt(ctx context.Context, tries int, backoff time.Duration, fn func() error) error {
+	cond := func(i, tries int) bool {
+		if tries < 0 {
+			return true
+		}
+		return i < tries
+	}
+
+	var err error
+	for i := 0; cond(i, tries); i++ {
+		select {
+		case <-ctx.Done():
+			return err
+		default:
+		}
+
+		if err = fn(); err == nil {
+			return nil
+		}
+		time.Sleep(backoff)
+	}
+	return err
 }

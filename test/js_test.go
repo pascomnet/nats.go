@@ -3202,17 +3202,8 @@ func withJSClusterAndStream(t *testing.T, clusterName string, size int, stream *
 			t.Fatal(err)
 		}
 
-		timeout := time.Now().Add(10 * time.Second)
-		for time.Now().Before(timeout) {
-			_, err = jsm.AddStream(stream)
-			if err != nil {
-				t.Logf("WARN: Got error while trying to create stream: %v", err)
-				// Backoff for a bit until cluster and resources ready.
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
-			break
-		}
+		_, err = jsm.AddStream(stream,
+			nats.MaxRetries(20), nats.RetryBackoff(500*time.Millisecond))
 		if err != nil {
 			t.Fatalf("Unexpected error creating stream: %v", err)
 		}
@@ -3841,30 +3832,30 @@ func testJetStream_ClusterReconnectDurableQueueSubscriber(t *testing.T, subject 
 	}
 
 	// Check for persisted messages, this could fail a few times.
-	var stream *nats.StreamInfo
-	timeout := time.Now().Add(5 * time.Second)
-	for time.Now().Before(timeout) {
-		stream, err = js.StreamInfo(subject)
-		if err == nats.ErrTimeout {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		} else if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-		break
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	stream, err := js.StreamInfo(
+		subject,
+		nats.Context(ctx),
+		nats.MaxRetries(-1),
+		nats.RetryBackoff(100*time.Millisecond),
+	)
+	cancel()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
 	}
 	if stream == nil {
 		t.Logf("WARN: Failed to get stream info: %v", err)
 	}
 
 	var failedPubs int
+	var deadline time.Time
 	for i := 10; i < totalMsgs; i++ {
 		var published bool
 		payload := fmt.Sprintf("i:%d", i)
-		timeout = time.Now().Add(5 * time.Second)
+		deadline = time.Now().Add(5 * time.Second)
 
 	Retry:
-		for time.Now().Before(timeout) {
+		for time.Now().Before(deadline) {
 			_, err = js.Publish(subject, []byte(payload))
 
 			// Skip temporary errors.

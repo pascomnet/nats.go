@@ -127,6 +127,9 @@ type jsOpts struct {
 	wait time.Duration
 	// Signals only direct access and no API access.
 	direct bool
+
+	maxTries     int
+	retryBackoff time.Duration
 }
 
 const defaultRequestWait = 5 * time.Second
@@ -190,6 +193,23 @@ func DirectOnly() JSOpt {
 		js.direct = true
 		return nil
 	})
+}
+
+// MaxRetries indicates the number of times to retry a failed operation. -1
+// means infinite retries.
+type MaxRetries int
+
+func (v MaxRetries) configureJSContext(opts *jsOpts) error {
+	opts.maxTries = int(v)
+	return nil
+}
+
+// RetryBackoff indicates how long to wait between retries.
+type RetryBackoff time.Duration
+
+func (v RetryBackoff) configureJSContext(opts *jsOpts) error {
+	opts.retryBackoff = time.Duration(v)
+	return nil
 }
 
 func (js *js) apiSubj(subj string) string {
